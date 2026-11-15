@@ -51,87 +51,73 @@ def candles(sym):
                 "sma20":sum(closes[-20:])/20,"sma50":sum(closes[-50:])/50,
                 "last_close":closes[-1],"last_close_ms":int(rows[-1][6]),
                 "last_volume":float(rows[-1][7]),
-                "avg_volume20":sum(float(x[7]) for x in rows[-20:])/20}
+                "avg_volume20":sum(float(x[7]) for x in rows[-20:])/20,\n                "recent_high5":max(float(x[2]) for x in rows[-5:]),\n                "recent_low5":min(float(x[3]) for x in rows[-5:]),\n                "prev_high20":max(float(x[2]) for x in rows[-21:-1]),\n                "prev_low20":min(float(x[3]) for x in rows[-21:-1])}
     return sym,{"h1":calc(h1),"h4":calc(h4)}
 
 def verify_trade(sym, data, tick, remaining_hours):
-    """Direction-first screening. Results are conditional setups, not execution forecasts."""
+    """Conservative structural setups, never guaranteed executable trades."""
     from urllib.parse import quote
-    h=data["h1"]; h4=data["h4"]; p=float(tick["last"]); atr=h["atr14"]
-    if not atr or p<=0 or remaining_hours<=0.5:
-        return []
-    # Require trend agreement on both timeframes, and meaningful 1h volume.
-    long_trend=(h4["last_close"]>h4["sma20"]>h4["sma50"] and
-                h["last_close"]>h["sma20"]>h["sma50"])
-    short_trend=(h4["last_close"]<h4["sma20"]<h4["sma50"] and
-                 h["last_close"]<h["sma20"]<h["sma50"])
-    if not (long_trend or short_trend):
-        return []
-    if h["last_volume"]<0.75*h["avg_volume20"]:
-        return []
-    # Reject stale prices that have moved far away from the last closed 1h bar.
-    if abs(p-h["last_close"])>0.8*atr:
-        return []
-    # Orderbook and funding are checked only after trend/volume gates.
+    h=data["h1"]; h4=data["h4"]; p=float(tick["last"]); a=h["atr14"]
+    if not a or p<=0 or remaining_hours<2 or tick["quote_volume24"]<20000000:return []
+    if h["last_volume"]<h["avg_volume20"] or abs(p-h["last_close"])>0.35*a:return []
+    long_ok=(h4["last_close"]>h4["sma20"]>h4["sma50"] and h["last_close"]>h["sma20"]>h["sma50"])
+    short_ok=(h4["last_close"]<h4["sma20"]<h4["sma50"] and h["last_close"]<h["sma20"]<h["sma50"])
+    if not(long_ok or short_ok):return []
     q=quote(sym)
     premium=get("/fapi/v1/premiumIndex?symbol="+q)
     book=get("/fapi/v1/depth?symbol="+q+"&limit=20")
-    bids=[(float(price),float(qty)) for price,qty in book.get("bids",[])]
-    asks=[(float(price),float(qty)) for price,qty in book.get("asks",[])]
-    if not bids or not asks: raise ValueError("empty orderbook")
-    bid,ask=bids[0][0],asks[0][0]
-    mid=(bid+ask)/2
-    spread=(ask-bid)/mid
-    if spread>0.001: return []
+    bids=[(float(v),float(n)) for v,n in book.get("bids",[])]
+    asks=[(float(v),float(n)) for v,n in book.get("asks",[])]
+    if not bids or not asks:raise ValueError("empty orderbook")
+    mid=(bids[0][0]+asks[0][0])/2
+    spread=(asks[0][0]-bids[0][0])/mid
+    if spread>0.0008:return []
     def impact(levels):
-        remaining=1000.0; qty=0.0; spent=0.0
+        left=1000.;qty=0.
         for price,amount in levels:
-            take=min(remaining,price*amount)
-            qty+=take/price;spent+=take;remaining-=take
-            if remaining<=0: break
-        if remaining>0: raise ValueError("insufficient $1000 book depth")
-        return spent/qty
+            value=min(left,price*amount)
+            qty+=value/price;left-=value
+            if left<=0:break
+        if left>0:raise ValueError("insufficient depth")
+        return 1000./qty
     slip=max(impact(asks)/mid-1,1-impact(bids)/mid,0)
-    if slip>0.001: return []
+    if slip>0.0008:return []
     funding=abs(float(premium.get("lastFundingRate",0)))
     cost=0.001+2*max(slip,0.00025)+0.0001+funding
-    # Conservative intraday distance cap; NOT a probability estimate.
-    reachable=atr*min(2.0,math.sqrt(max(0,remaining_hours)))
-    results=[]
-    for side in ("LONG","SHORT"):
-        if side=="LONG" and not long_trend: continue
-        if side=="SHORT" and not short_trend: continue
-        # Entry at a nearby retest of the 1h SMA20, never beyond 0.35 ATR.
+    result=[]
+    for side,ok in (("LONG",long_ok),("SHORT",short_ok)):
+        if not ok:continue
+        # Only consider a nearby SMA20 retest; don't assume that it will fill.
         entry=h["sma20"]
-        if abs(entry-p)>0.35*atr: continue
-        # Target must be an observed nearby structure level, and remain
-        # reachable after entry; historical extrema are NOT forecasts.
-        target=h["high20"] if side=="LONG" else h["low20"]
-        if side=="LONG":
-            if not (entry<target and entry>h["low20"]): continue
-            stop=entry-0.8*atr
-            gross=(target-entry)/entry
-        else:
-            if not (entry>target and entry<h["high20"]): continue
-            stop=entry+0.8*atr
-            gross=(entry-target)/entry
-        if abs(target-entry)>min(1.5*atr,reachable): continue
-        if abs(entry-p)+abs(target-entry)>reachable: continue
-        net=3*(gross-cost)
-        loss=3*(abs(entry-stop)/entry+cost)
-        if net<0.05 or loss<=0 or net/loss<1.2: continue
-        results.append({"symbol":sym,"direction":side,"snapshot_price":p,
+        if abs(entry-p)>0.25*a:continue
+        # Structural invalidation uses the preceding five completed bars.
+        stop=(h["recent_low5"]-0.1*a if side=="LONG" else h["recent_high5"]+0.1*a)
+        # Prior swing extremum is a *candidate* exit, not a predicted destination.
+        target=(h["prev_high20"] if side=="LONG" else h["prev_low20"])
+        risk=(entry-stop if side=="LONG" else stop-entry)
+        reward=(target-entry if side=="LONG" else entry-target)
+        if risk<=0 or reward<=0:continue
+        if risk>1.2*a or reward>1.0*a:continue
+        # Require enough movement after a hypothetical entry; ATR is a cap,
+        # not an entry-before-exit probability model.
+        if abs(entry-p)+reward>min(1.5*a,a*math.sqrt(remaining_hours)):continue
+        net=3*(reward/entry-cost)
+        loss=3*(risk/entry+cost)
+        if net<0.05 or loss<=0 or net/loss<1.5:continue
+        result.append({"symbol":sym,"direction":side,"snapshot_price":p,
             "entry":entry,"take_profit":target,"stop_loss":stop,
             "net_margin_pct":round(net*100,2),
             "stop_margin_loss_pct":round(loss*100,2),
             "reward_risk":round(net/loss,2),
             "funding_rate":funding,"spread_pct":round(spread*100,4),
-            "book_slippage_pct":round(slip*100,4),
-            "atr1h":atr,"target_basis":"observed 1h 20-bar structure",
+            "book_slippage_pct":round(slip*100,4),"atr1h":a,
             "cost_notional_pct":round(cost*100,4),
-            "trend_confirmation":"1h and 4h SMA20/SMA50 aligned",
-            "note":"Directional and ATR screening only; entry-before-TP probability unverified"})
-    return results
+            "entry_basis":"1h SMA20 retest, conditional",
+            "stop_basis":"last five closed 1h candles plus 0.1 ATR buffer",
+            "target_basis":"previous 20 closed 1h candles swing extreme",
+            "validation":"UNVERIFIED - paper testing and chronological fill validation required",
+            "note":"NOT AN ORDER: historical extrema and ATR cannot establish intraday fill probability"})
+    return result
 
 def main():
     os.makedirs("data",exist_ok=True)
@@ -173,11 +159,11 @@ def main():
                 verified.extend(verify_trade(sym,ind,tickrow,remaining_hours))
             except Exception as e:verification_errors[sym]=str(e)[:240]
         verified.sort(key=lambda x:(x["reward_risk"],x["net_margin_pct"]),reverse=True)
-        out["trade_screen"]=verified[:3]
-        out["trade_screen_count"]=len(verified)
+        out["research_candidates"]=verified[:10]\n        out["trade_screen"]=[]  # Disable actionable signals until chronological paper validation
+        out["trade_screen_count"]=0\n        out["research_candidate_count"]=len(verified)\n        out["signal_status"]="DISABLED_PENDING_PAPER_VALIDATION"
         out["verification_errors"]=verification_errors
         out["remaining_hours_kst"]=round(remaining_hours,3)
-        out["trade_screen_disclaimer"]="Direction-first conditional screening; historical structure and ATR cannot establish entry-before-TP probability or same-day fill."
+        out["trade_screen_disclaimer"]="No actionable orders until independent forward validation of entry-before-exit sequence and net realized returns."
         out["incomplete"]=out["deep_count"]<len(chosen)
         out["status"]="ok" if not out["incomplete"] else "partial"
     except Exception as e:out["error"]=str(e)[:1600]
