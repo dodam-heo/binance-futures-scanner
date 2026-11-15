@@ -4,15 +4,27 @@ import json, os, time, math, statistics, urllib.request, urllib.error
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-BASES=["https://fapi.binance.com","https://fapi1.binance.com","https://fapi2.binance.com","https://fapi3.binance.com","https://fapi4.binance.com"]
+BASES=["https://fapi.binance.com","https://fapi1.binance.com","https://fapi2.binance.com","https://fapi3.binance.com","https://fapi4.binance.com","https://api-dev.pipai.org"]
+ACTIVE_BASE=None
+DIAGNOSTICS=[]
 def get(path):
+    global ACTIVE_BASE
     errors=[]
-    for base in BASES:
+    bases=([ACTIVE_BASE] if ACTIVE_BASE else [])+[b for b in BASES if b!=ACTIVE_BASE]
+    for base in bases:
         try:
-            req=urllib.request.Request(base+path,headers={"User-Agent":"market-data-research/1.0"})
-            with urllib.request.urlopen(req,timeout=8) as r:
-                return json.load(r)
-        except Exception as e: errors.append(base+": "+str(e)[:130])
+            req=urllib.request.Request(base+path,headers={"User-Agent":"market-data-research/1.0","Accept":"application/json"})
+            with urllib.request.urlopen(req,timeout=12) as r:
+                raw=r.read()
+                try: data=json.loads(raw)
+                except ValueError: raise ValueError("non-JSON HTTP %s body=%r"%(r.status,raw[:160]))
+                if isinstance(data,dict) and ("code" in data and "msg" in data):raise ValueError("API error "+str(data)[:200])
+                ACTIVE_BASE=base
+                return data
+        except Exception as e:
+            err=base+" "+path.split("?")[0]+": "+str(e)[:200]
+            errors.append(err)
+            if len(DIAGNOSTICS)<40:DIAGNOSTICS.append(err)
     raise RuntimeError("; ".join(errors))
 def atr(rows,period=14):
     if len(rows)<period+1:return None
@@ -42,7 +54,7 @@ def candles(sym):
     return sym,{"h1":calc(h1),"h4":calc(h4)}
 def main():
     os.makedirs("data",exist_ok=True)
-    out={"timestamp_utc":datetime.now(timezone.utc).isoformat(),"source":"Binance USD-M Futures REST API","status":"error","error":None,"universe_count":0,"deep_count":0,"incomplete":True,"symbols":[],"deep":{}}
+    out={"timestamp_utc":datetime.now(timezone.utc).isoformat(),"source":"Binance USD-M Futures REST API or PipAI mirror","status":"error","error":None,"universe_count":0,"deep_count":0,"incomplete":True,"symbols":[],"deep":{}}
     try:
         exchange=get("/fapi/v1/exchangeInfo")
         universe={s["symbol"] for s in exchange["symbols"] if s.get("status")=="TRADING" and s.get("contractType")=="PERPETUAL" and s.get("quoteAsset")=="USDT"}
@@ -67,11 +79,14 @@ def main():
                 except Exception as e:
                     deep[futures[f]]={"error":str(e)[:350]}
         out["deep"]=deep
+        out["active_base"]=ACTIVE_BASE
         out["deep_count"]=sum("error" not in x for x in deep.values())
         out["incomplete"]=out["deep_count"]<20
         out["status"]="ok" if not out["incomplete"] else "partial"
     except Exception as e:out["error"]=str(e)[:1600]
     out["timestamp_utc"]=datetime.now(timezone.utc).isoformat()
+    out["diagnostics"]=DIAGNOSTICS
+    out["active_base"]=ACTIVE_BASE
     with open("data/latest.json","w") as f:json.dump(out,f,ensure_ascii=False,separators=(",",":"),allow_nan=False)
     print(json.dumps({k:out[k] for k in ["timestamp_utc","status","universe_count","deep_count","incomplete","error"]},ensure_ascii=False))
     if out["status"]!="ok":raise SystemExit(1)
