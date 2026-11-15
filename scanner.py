@@ -55,68 +55,83 @@ def candles(sym):
     return sym,{"h1":calc(h1),"h4":calc(h4)}
 
 def verify_trade(sym, data, tick, remaining_hours):
-    """Conservative structure-first trade screening; no probability guarantee."""
+    """Direction-first screening. Results are conditional setups, not execution forecasts."""
     from urllib.parse import quote
+    h=data["h1"]; h4=data["h4"]; p=float(tick["last"]); atr=h["atr14"]
+    if not atr or p<=0 or remaining_hours<=0.5:
+        return []
+    # Require trend agreement on both timeframes, and meaningful 1h volume.
+    long_trend=(h4["last_close"]>h4["sma20"]>h4["sma50"] and
+                h["last_close"]>h["sma20"]>h["sma50"])
+    short_trend=(h4["last_close"]<h4["sma20"]<h4["sma50"] and
+                 h["last_close"]<h["sma20"]<h["sma50"])
+    if not (long_trend or short_trend):
+        return []
+    if h["last_volume"]<0.75*h["avg_volume20"]:
+        return []
+    # Reject stale prices that have moved far away from the last closed 1h bar.
+    if abs(p-h["last_close"])>0.8*atr:
+        return []
+    # Orderbook and funding are checked only after trend/volume gates.
     q=quote(sym)
     premium=get("/fapi/v1/premiumIndex?symbol="+q)
     book=get("/fapi/v1/depth?symbol="+q+"&limit=20")
-    bids=[(float(p),float(v)) for p,v in book.get("bids",[])]
-    asks=[(float(p),float(v)) for p,v in book.get("asks",[])]
-    if not bids or not asks:raise ValueError("empty orderbook")
+    bids=[(float(price),float(qty)) for price,qty in book.get("bids",[])]
+    asks=[(float(price),float(qty)) for price,qty in book.get("asks",[])]
+    if not bids or not asks: raise ValueError("empty orderbook")
     bid,ask=bids[0][0],asks[0][0]
     mid=(bid+ask)/2
     spread=(ask-bid)/mid
-    if spread>0.001:raise ValueError("spread above 0.10%")
-    notional=1000.0
-    def impact(levels, side):
-        rem=notional;qty=0;cost=0
+    if spread>0.001: return []
+    def impact(levels):
+        remaining=1000.0; qty=0.0; spent=0.0
         for price,amount in levels:
-            take=min(rem,price*amount)
-            qty+=take/price
-            cost+=take
-            rem-=take
-            if rem<=0:break
-        if rem>0:raise ValueError("insufficient $1000 book depth")
-        return cost/qty
-    buy=impact(asks,"buy");sell=impact(bids,"sell")
-    slip=max((buy/mid-1),(1-sell/mid),0)
-    if slip>0.001:raise ValueError("book impact above 0.10%")
+            take=min(remaining,price*amount)
+            qty+=take/price;spent+=take;remaining-=take
+            if remaining<=0: break
+        if remaining>0: raise ValueError("insufficient $1000 book depth")
+        return spent/qty
+    slip=max(impact(asks)/mid-1,1-impact(bids)/mid,0)
+    if slip>0.001: return []
     funding=abs(float(premium.get("lastFundingRate",0)))
-    # Conservative two-sided costs: 0.1% taker fees + orderbook spread/impact
-    # on entry and exit + 0.01% buffer + possible funding.
     cost=0.001+2*max(slip,0.00025)+0.0001+funding
-    h=data["h1"];p=float(tick["last"]);atr=h["atr14"]
-    if not atr or remaining_hours<=0.25:raise ValueError("insufficient remaining time")
-    options=[]
+    # Conservative intraday distance cap; NOT a probability estimate.
+    reachable=atr*min(2.0,math.sqrt(max(0,remaining_hours)))
+    results=[]
     for side in ("LONG","SHORT"):
-        # Targets strictly bounded by observed 20-bar extrema.
+        if side=="LONG" and not long_trend: continue
+        if side=="SHORT" and not short_trend: continue
+        # Entry at a nearby retest of the 1h SMA20, never beyond 0.35 ATR.
+        entry=h["sma20"]
+        if abs(entry-p)>0.35*atr: continue
+        # Target must be an observed nearby structure level, and remain
+        # reachable after entry; historical extrema are NOT forecasts.
+        target=h["high20"] if side=="LONG" else h["low20"]
         if side=="LONG":
-            entry=min(p, h["sma20"])
-            target=h["high20"]
+            if not (entry<target and entry>h["low20"]): continue
             stop=entry-0.8*atr
             gross=(target-entry)/entry
-            distance=abs(p-entry)/p
         else:
-            entry=max(p,h["sma20"])
-            target=h["low20"]
+            if not (entry>target and entry<h["high20"]): continue
             stop=entry+0.8*atr
             gross=(entry-target)/entry
-            distance=abs(p-entry)/p
+        if abs(target-entry)>min(1.5*atr,reachable): continue
+        if abs(entry-p)+abs(target-entry)>reachable: continue
         net=3*(gross-cost)
-        risk=3*(abs(entry-stop)/entry+cost)
-        # Avoid extrapolating farther than remaining-time ATR scaling.
-        reachable=atr*max(0.5,math.sqrt(remaining_hours))
-        if gross<=0 or net<0.05 or risk<=0 or (net/risk)<1.2:continue
-        if abs(target-entry)>reachable or abs(entry-p)>0.35*reachable:continue
-        options.append({"symbol":sym,"direction":side,"snapshot_price":p,
+        loss=3*(abs(entry-stop)/entry+cost)
+        if net<0.05 or loss<=0 or net/loss<1.2: continue
+        results.append({"symbol":sym,"direction":side,"snapshot_price":p,
             "entry":entry,"take_profit":target,"stop_loss":stop,
-            "net_margin_pct":round(net*100,2),"stop_margin_loss_pct":round(risk*100,2),
-            "reward_risk":round(net/risk,2),"funding_rate":funding,
-            "spread_pct":round(spread*100,4),"book_slippage_pct":round(slip*100,4),
-            "atr1h":atr,"target_basis":"1h 20-candle observed high/low",
+            "net_margin_pct":round(net*100,2),
+            "stop_margin_loss_pct":round(loss*100,2),
+            "reward_risk":round(net/loss,2),
+            "funding_rate":funding,"spread_pct":round(spread*100,4),
+            "book_slippage_pct":round(slip*100,4),
+            "atr1h":atr,"target_basis":"observed 1h 20-bar structure",
             "cost_notional_pct":round(cost*100,4),
-            "note":"ATR distance screen is not an entry-before-TP probability estimate"})
-    return options
+            "trend_confirmation":"1h and 4h SMA20/SMA50 aligned",
+            "note":"Directional and ATR screening only; entry-before-TP probability unverified"})
+    return results
 
 def main():
     os.makedirs("data",exist_ok=True)
@@ -162,7 +177,7 @@ def main():
         out["trade_screen_count"]=len(verified)
         out["verification_errors"]=verification_errors
         out["remaining_hours_kst"]=round(remaining_hours,3)
-        out["trade_screen_disclaimer"]="Conditional structure/ATR screening only; entry-before-TP likelihood and future execution cannot be verified from snapshots."
+        out["trade_screen_disclaimer"]="Direction-first conditional screening; historical structure and ATR cannot establish entry-before-TP probability or same-day fill."
         out["incomplete"]=out["deep_count"]<len(chosen)
         out["status"]="ok" if not out["incomplete"] else "partial"
     except Exception as e:out["error"]=str(e)[:1600]
