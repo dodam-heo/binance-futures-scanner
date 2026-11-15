@@ -52,6 +52,71 @@ def candles(sym):
                 "last_volume":float(rows[-1][7]),
                 "avg_volume20":sum(float(x[7]) for x in rows[-20:])/20}
     return sym,{"h1":calc(h1),"h4":calc(h4)}
+
+def verify_trade(sym, data, tick, remaining_hours):
+    """Conservative structure-first trade screening; no probability guarantee."""
+    from urllib.parse import quote
+    q=quote(sym)
+    premium=get("/fapi/v1/premiumIndex?symbol="+q)
+    book=get("/fapi/v1/depth?symbol="+q+"&limit=20")
+    bids=[(float(p),float(v)) for p,v in book.get("bids",[])]
+    asks=[(float(p),float(v)) for p,v in book.get("asks",[])]
+    if not bids or not asks:raise ValueError("empty orderbook")
+    bid,ask=bids[0][0],asks[0][0]
+    mid=(bid+ask)/2
+    spread=(ask-bid)/mid
+    if spread>0.001:raise ValueError("spread above 0.10%")
+    notional=1000.0
+    def impact(levels, side):
+        rem=notional;qty=0;cost=0
+        for price,amount in levels:
+            take=min(rem,price*amount)
+            qty+=take/price
+            cost+=take
+            rem-=take
+            if rem<=0:break
+        if rem>0:raise ValueError("insufficient $1000 book depth")
+        return cost/qty
+    buy=impact(asks,"buy");sell=impact(bids,"sell")
+    slip=max((buy/mid-1),(1-sell/mid),0)
+    if slip>0.001:raise ValueError("book impact above 0.10%")
+    funding=abs(float(premium.get("lastFundingRate",0)))
+    # Conservative two-sided costs: 0.1% taker fees + orderbook spread/impact
+    # on entry and exit + 0.01% buffer + possible funding.
+    cost=0.001+2*max(slip,0.00025)+0.0001+funding
+    h=data["h1"];p=float(tick["last"]);atr=h["atr14"]
+    if not atr or remaining_hours<=0.25:raise ValueError("insufficient remaining time")
+    options=[]
+    for side in ("LONG","SHORT"):
+        # Targets strictly bounded by observed 20-bar extrema.
+        if side=="LONG":
+            entry=min(p, h["sma20"])
+            target=h["high20"]
+            stop=entry-0.8*atr
+            gross=(target-entry)/entry
+            distance=abs(p-entry)/p
+        else:
+            entry=max(p,h["sma20"])
+            target=h["low20"]
+            stop=entry+0.8*atr
+            gross=(entry-target)/entry
+            distance=abs(p-entry)/p
+        net=3*(gross-cost)
+        risk=3*(abs(entry-stop)/entry+cost)
+        # Avoid extrapolating farther than remaining-time ATR scaling.
+        reachable=atr*max(0.5,math.sqrt(remaining_hours))
+        if gross<=0 or net<0.05 or risk<=0 or (net/risk)<1.2:continue
+        if abs(target-entry)>reachable or abs(entry-p)>0.35*reachable:continue
+        options.append({"symbol":sym,"direction":side,"snapshot_price":p,
+            "entry":entry,"take_profit":target,"stop_loss":stop,
+            "net_margin_pct":round(net*100,2),"stop_margin_loss_pct":round(risk*100,2),
+            "reward_risk":round(net/risk,2),"funding_rate":funding,
+            "spread_pct":round(spread*100,4),"book_slippage_pct":round(slip*100,4),
+            "atr1h":atr,"target_basis":"1h 20-candle observed high/low",
+            "cost_notional_pct":round(cost*100,4),
+            "note":"ATR distance screen is not an entry-before-TP probability estimate"})
+    return options
+
 def main():
     os.makedirs("data",exist_ok=True)
     out={"timestamp_utc":datetime.now(timezone.utc).isoformat(),"source":"Binance USD-M Futures REST API or PipAI mirror","status":"error","error":None,"universe_count":0,"deep_count":0,"incomplete":True,"symbols":[],"deep":{}}
@@ -81,6 +146,21 @@ def main():
         out["deep"]=deep
         out["active_base"]=ACTIVE_BASE
         out["deep_count"]=sum("error" not in x for x in deep.values())
+        kst=datetime.now(timezone.utc).timestamp()+9*3600
+        remaining_hours=max(0,((int(kst//86400)+1)*86400-60-kst)/3600)
+        verified=[];verification_errors={}
+        for sym,ind in deep.items():
+            if "error" in ind:continue
+            try:
+                tickrow=next(x for x in rows if x["symbol"]==sym)
+                verified.extend(verify_trade(sym,ind,tickrow,remaining_hours))
+            except Exception as e:verification_errors[sym]=str(e)[:240]
+        verified.sort(key=lambda x:(x["reward_risk"],x["net_margin_pct"]),reverse=True)
+        out["trade_screen"]=verified[:3]
+        out["trade_screen_count"]=len(verified)
+        out["verification_errors"]=verification_errors
+        out["remaining_hours_kst"]=round(remaining_hours,3)
+        out["trade_screen_disclaimer"]="Conditional structure/ATR screening only; entry-before-TP likelihood and future execution cannot be verified from snapshots."
         out["incomplete"]=out["deep_count"]<20
         out["status"]="ok" if not out["incomplete"] else "partial"
     except Exception as e:out["error"]=str(e)[:1600]
