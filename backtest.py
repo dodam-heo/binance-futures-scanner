@@ -26,9 +26,11 @@ def stats(rows):
 def replay(h1,h4,symbol,cost_pct=0.25):
     h1=sorted(h1,key=lambda b:int(b[0]));h4=sorted(h4,key=lambda b:int(b[0]))
     trades=[]
+    last_setup_expiry=0
     # Timestamp in Binance kline column 6 is close time; only use fully closed candles.
     for i in range(51,len(h1)-1):
         last=int(h1[i][6]);now=last+1
+        if now<last_setup_expiry:continue
         history4=[x for x in h4 if int(x[6])<=last]
         if len(history4)<51:continue
         a=stats(h1[:i+1]);b=stats(history4)
@@ -62,6 +64,8 @@ def replay(h1,h4,symbol,cost_pct=0.25):
             if result["status"] in ("OPEN","UNFILLED"):
                 result["status"]="EXPIRED_"+result["status"]
             trades.append({"setup_ms":now,"symbol":symbol,"side":side,**result})
+            last_setup_expiry=end
+            break
     closed=[x for x in trades if x["status"] in ("TP","STOP")]
     filled=[x for x in trades if x["status"] not in ("EXPIRED_UNFILLED","UNFILLED")]
     pnl=[x["net_margin_pct"] for x in closed]
