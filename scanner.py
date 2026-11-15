@@ -51,7 +51,11 @@ def candles(sym):
                 "sma20":sum(closes[-20:])/20,"sma50":sum(closes[-50:])/50,
                 "last_close":closes[-1],"last_close_ms":int(rows[-1][6]),
                 "last_volume":float(rows[-1][7]),
-                "avg_volume20":sum(float(x[7]) for x in rows[-20:])/20,\n                "recent_high5":max(float(x[2]) for x in rows[-5:]),\n                "recent_low5":min(float(x[3]) for x in rows[-5:]),\n                "prev_high20":max(float(x[2]) for x in rows[-21:-1]),\n                "prev_low20":min(float(x[3]) for x in rows[-21:-1])}
+                "avg_volume20":sum(float(x[7]) for x in rows[-20:])/20,
+                "recent_high5":max(float(x[2]) for x in rows[-5:]),
+                "recent_low5":min(float(x[3]) for x in rows[-5:]),
+                "prev_high20":max(float(x[2]) for x in rows[-21:-1]),
+                "prev_low20":min(float(x[3]) for x in rows[-21:-1])}
     return sym,{"h1":calc(h1),"h4":calc(h4)}
 
 def verify_trade(sym, data, tick, remaining_hours):
@@ -159,12 +163,15 @@ def main():
                 verified.extend(verify_trade(sym,ind,tickrow,remaining_hours))
             except Exception as e:verification_errors[sym]=str(e)[:240]
         verified.sort(key=lambda x:(x["reward_risk"],x["net_margin_pct"]),reverse=True)
-        out["research_candidates"]=verified[:10]\n        out["trade_screen"]=[]  # Disable actionable signals until chronological paper validation
-        out["trade_screen_count"]=0\n        out["research_candidate_count"]=len(verified)\n        out["signal_status"]="DISABLED_PENDING_PAPER_VALIDATION"
+        out["research_candidates"]=verified[:10]
+        out["trade_screen"]=[]  # Disable actionable signals until chronological paper validation
+        out["trade_screen_count"]=0
+        out["research_candidate_count"]=len(verified)
+        out["signal_status"]="DISABLED_PENDING_PAPER_VALIDATION"
         out["verification_errors"]=verification_errors
         out["remaining_hours_kst"]=round(remaining_hours,3)
         out["trade_screen_disclaimer"]="No actionable orders until independent forward validation of entry-before-exit sequence and net realized returns."
-        out["incomplete"]=out["deep_count"]<len(chosen)
+        out["incomplete"]=out["deep_count"]<len(chosen) or bool(verification_errors)
         out["status"]="ok" if not out["incomplete"] else "partial"
     except Exception as e:out["error"]=str(e)[:1600]
     out["timestamp_utc"]=datetime.now(timezone.utc).isoformat()
