@@ -131,11 +131,11 @@ def main():
             rows.append({"symbol":t["symbol"],"last":float(t["lastPrice"]),"high24":float(t["highPrice"]),"low24":float(t["lowPrice"]),"change24_pct":float(t["priceChangePercent"]),"quote_volume24":float(t["quoteVolume"])})
         out["symbols"]=rows
         if len(rows)!=len(universe):raise RuntimeError("24h ticker incomplete: %s/%s"%(len(rows),len(universe)))
-        liquid=[x for x in rows if x["quote_volume24"]>=10000000 and x["last"]>0]
+        liquid=[x for x in rows if x["last"]>0]
         liquid.sort(key=lambda x:x["quote_volume24"]*max(abs(x["change24_pct"]),1),reverse=True)
-        chosen=liquid[:30]
+        chosen=liquid
         deep={}
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=12) as pool:
             futures={pool.submit(candles,x["symbol"]):x["symbol"] for x in chosen}
             for f in as_completed(futures):
                 try:
@@ -151,6 +151,7 @@ def main():
         verified=[];verification_errors={}
         for sym,ind in deep.items():
             if "error" in ind:continue
+            if next(x for x in rows if x["symbol"]==sym)["quote_volume24"]<10000000:continue
             try:
                 tickrow=next(x for x in rows if x["symbol"]==sym)
                 verified.extend(verify_trade(sym,ind,tickrow,remaining_hours))
@@ -161,7 +162,7 @@ def main():
         out["verification_errors"]=verification_errors
         out["remaining_hours_kst"]=round(remaining_hours,3)
         out["trade_screen_disclaimer"]="Conditional structure/ATR screening only; entry-before-TP likelihood and future execution cannot be verified from snapshots."
-        out["incomplete"]=out["deep_count"]<20
+        out["incomplete"]=out["deep_count"]<len(chosen)
         out["status"]="ok" if not out["incomplete"] else "partial"
     except Exception as e:out["error"]=str(e)[:1600]
     out["timestamp_utc"]=datetime.now(timezone.utc).isoformat()
