@@ -26,6 +26,17 @@ class PaperValidatorTests(unittest.TestCase):
         x=dict(BASE,direction="SHORT",take_profit=95,stop_loss=102)
         r=simulate(x,[bar(1000,101,99),bar(3601000,101,94)])
         self.assertEqual(r["status"],"TP")
+    def test_cost_units_are_percentage_not_decimal(self):
+        r=simulate(BASE,[bar(1000,101,99),bar(3601000,106,99)])
+        self.assertEqual(r["net_margin_pct"],14.4)
+    def test_expiry_overlapping_hour_is_excluded(self):
+        x=dict(BASE,expires_ms=3601000+1800000)
+        r=simulate(x,[bar(1000,101,99),bar(3601000,106,99)])
+        self.assertEqual(r["status"],"OPEN")
+    def test_bars_before_setup_are_ignored(self):
+        x=dict(BASE,created_ms=3601000)
+        r=simulate(x,[bar(1000,101,99),bar(3601000,110,106)])
+        self.assertEqual(r["status"],"UNFILLED")
     def test_invalid_geometry(self):
         with self.assertRaises(ValueError):
             simulate(dict(BASE,stop_loss=101),[])
