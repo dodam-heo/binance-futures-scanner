@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Public Binance USD-M perpetual market snapshot. No credentials or trades."""
-import json, os, time, math, statistics, urllib.request, urllib.error
+import json, os, time, math, statistics, gzip, urllib.request, urllib.error
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -16,6 +16,7 @@ def get(path):
             req=urllib.request.Request(base+path,headers={"User-Agent":"market-data-research/1.0","Accept":"application/json"})
             with urllib.request.urlopen(req,timeout=12) as r:
                 raw=r.read()
+                if raw[:2]==b'\x1f\x8b': raw=gzip.decompress(raw)
                 try: data=json.loads(raw)
                 except ValueError: raise ValueError("non-JSON HTTP %s body=%r"%(r.status,raw[:160]))
                 if isinstance(data,dict) and ("code" in data and "msg" in data):raise ValueError("API error "+str(data)[:200])
