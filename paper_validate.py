@@ -16,11 +16,11 @@ def simulate(trade, bars, cost_pct=None):
     if not (stop<entry<tp if side=="LONG" else tp<entry<stop):
         raise ValueError("invalid price geometry")
     start=int(trade["created_ms"]); deadline=int(trade["expires_ms"])
-    cost=float(cost_pct if cost_pct is not None else trade["cost_notional_pct"])
+    cost=float(cost_pct if cost_pct is not None else trade["cost_notional_pct"])/100.0
     entered=False; entry_ms=None
     for bar in sorted(bars,key=lambda x:int(x[0])):
         ts=int(bar[0]); hi=float(bar[2]); lo=float(bar[3])
-        if ts<start or ts>=deadline:continue
+        if ts<start or ts+3600000>deadline:continue
         if hi<lo:raise ValueError("bad candle")
         if not entered:
             if not(lo<=entry<=hi):continue
@@ -55,8 +55,8 @@ def main():
     existing={t["id"] for t in ledger["trades"]}
     # A new paper setup is recorded only when scan is complete and fresh.
     scan_time=datetime.fromisoformat(snapshot["timestamp_utc"])
-    fresh=(now-scan_time).total_seconds()<900
-    if snapshot.get("status")=="ok" and fresh:
+    fresh=0<=(now-scan_time).total_seconds()<900
+    if snapshot.get("status")=="ok" and fresh and snapshot.get("signal_status")=="DISABLED_PENDING_PAPER_VALIDATION":
         for c in snapshot.get("research_candidates",[])[:10]:
             created=int(scan_time.timestamp()*1000)
             kst=scan_time+timedelta(hours=9)
