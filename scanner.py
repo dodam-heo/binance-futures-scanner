@@ -163,7 +163,7 @@ def main():
                 verified.extend(verify_trade(sym,ind,tickrow,remaining_hours))
             except Exception as e:verification_errors[sym]=str(e)[:240]
         verified.sort(key=lambda x:(x["reward_risk"],x["net_margin_pct"]),reverse=True)
-        out["research_candidates"]=verified[:10]
+        out["research_candidates"]=verified[:10] if not (out["deep_count"]<len(chosen) or verification_errors) else []
         out["trade_screen"]=[]  # Disable actionable signals until chronological paper validation
         out["trade_screen_count"]=0
         out["research_candidate_count"]=len(verified)
@@ -171,7 +171,7 @@ def main():
         out["verification_errors"]=verification_errors
         out["remaining_hours_kst"]=round(remaining_hours,3)
         out["trade_screen_disclaimer"]="No actionable orders until independent forward validation of entry-before-exit sequence and net realized returns."
-        out["incomplete"]=out["deep_count"]<len(chosen) or bool(verification_errors)
+        out["missing_symbols"]=[sym for sym,item in deep.items() if "error" in item]\n        out["incomplete"]=out["deep_count"]<len(chosen) or bool(verification_errors)
         out["status"]="ok" if not out["incomplete"] else "partial"
     except Exception as e:out["error"]=str(e)[:1600]
     out["timestamp_utc"]=datetime.now(timezone.utc).isoformat()
