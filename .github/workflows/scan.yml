@@ -1,8 +1,6 @@
 name: Futures market snapshot
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '31 * * * *'
 permissions:
   contents: write
 concurrency:
