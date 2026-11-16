@@ -171,7 +171,8 @@ def main():
         out["verification_errors"]=verification_errors
         out["remaining_hours_kst"]=round(remaining_hours,3)
         out["trade_screen_disclaimer"]="No actionable orders until independent forward validation of entry-before-exit sequence and net realized returns."
-        out["missing_symbols"]=[sym for sym,item in deep.items() if "error" in item]\n        out["incomplete"]=out["deep_count"]<len(chosen) or bool(verification_errors)
+        out["missing_symbols"]=[sym for sym,item in deep.items() if "error" in item]
+        out["incomplete"]=out["deep_count"]<len(chosen) or bool(verification_errors)
         out["status"]="ok" if not out["incomplete"] else "partial"
     except Exception as e:out["error"]=str(e)[:1600]
     out["timestamp_utc"]=datetime.now(timezone.utc).isoformat()
